@@ -1135,8 +1135,17 @@ public:
             if (peers && peers->active()) {
                 uint8_t only_non_peer[512];
                 peers->build_non_peer_mask(il - 1, only_non_peer);
-                gx->run(il - 1, T, z_f, h_idx, h_w, zout_f, only_non_peer);
-                peers->run_prefill_tile_and_add(il - 1, T, z_f, h_idx, h_w, zout_f);
+                // Grouped XMX/SG16 peer prefill (default): launch on the peer queues BEFORE gx->run so
+                // peer-resident expert evaluation overlaps the primary GPU's expert eval + host-RAM
+                // streaming in hardware. HY4S_PEER_PF_LEGACY=1 keeps the serialized tile path.
+                if (peers->prefill_grouped() && peers->launch_prefill_grouped(il - 1, T, z_f, h_idx, h_w)) {
+                    gx->run(il - 1, T, z_f, h_idx, h_w, zout_f, only_non_peer);
+                    bool zi = true;  // gx->run's async reduce already covers all of zout_f on Q()
+                    peers->finish_prefill_grouped(T, zout_f, zi);
+                } else {
+                    gx->run(il - 1, T, z_f, h_idx, h_w, zout_f, only_non_peer);
+                    peers->run_prefill_tile_and_add(il - 1, T, z_f, h_idx, h_w, zout_f);
+                }
             } else {
                 gx->run(il - 1, T, z_f, h_idx, h_w, zout_f, nullptr);
             }
@@ -1182,7 +1191,12 @@ public:
             } else {
                 dzero(zout_f, nz * 4);
             }
-            peers->run_prefill_tile_and_add(il - 1, T, z_f, h_idx, h_w, zout_f);
+            if (peers->prefill_grouped() && peers->launch_prefill_grouped(il - 1, T, z_f, h_idx, h_w)) {
+                bool zi = true;  // zout_f initialized by the h2d/dzero above
+                peers->finish_prefill_grouped(T, zout_f, zi);
+            } else {
+                peers->run_prefill_tile_and_add(il - 1, T, z_f, h_idx, h_w, zout_f);
+            }
             t_cpu_exp += now_s() - tc;
             return;
         } else {

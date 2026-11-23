@@ -161,10 +161,11 @@ inline void vc_unpack16(int code, const uint8_t* blk, int g, int base_i, int8_t 
 
 // Pre-quantize M rows of VC_K (1536) activations into Q8_1_G64 (identical to hy4::CpuExperts: d = amax/127, q = clamp(rint(x/d), -127, 127)).
 // 1 SG16 subgroup per 64-element group (4 elements/lane), 16 groups per 256-thread WG.
+// `q` selects the device: defaults to the primary Q(), peer GPUs pass their own in-order queue (sy_peer.h SG16 decode).
 template <class ActT>
-inline void k_quant_q8_1_g64(const ActT* src, int M, int8_t* dst_q, float* dst_d) {
+inline void k_quant_q8_1_g64(const ActT* src, int M, int8_t* dst_q, float* dst_d, sycl::queue& q = Q()) {
     const int total_g = M * VC_NG;
-    Q().parallel_for(NR((total_g + 15) / 16, 256), [=](sycl::nd_item<1> it) REQD_SG16 {
+    q.parallel_for(NR((total_g + 15) / 16, 256), [=](sycl::nd_item<1> it) REQD_SG16 {
         const int gidx = (int)it.get_group(0) * 16 + ((int)it.get_local_id(0) >> 4);
         if (gidx >= total_g) return;
         auto sg = it.get_sub_group();
@@ -324,8 +325,8 @@ struct VramPair {
 // GEMM1 (fused gate + up + SwiGLU/sq) with pre-quantized Q8_1_G64 activations cached in SLM (<= 12 KiB/WG) + native SG16.
 // 96 WGs/expert x 256 threads (16 SG16 rows/WG) -> 1,536 rows. Each weight row loaded ONCE across all ntok <= NT tokens!
 template <int NT>
-inline void k_vcache_gemm1_q8(const VramExpertGroup* d_grps, int ngrps, const int8_t* d_zq, const float* d_zd, half* d_hmid) {
-    Q().submit([&](sycl::handler& h) {
+inline void k_vcache_gemm1_q8(const VramExpertGroup* d_grps, int ngrps, const int8_t* d_zq, const float* d_zd, half* d_hmid, sycl::queue& q = Q()) {
+    q.submit([&](sycl::handler& h) {
         sycl::local_accessor<int8_t, 1> sXq(NT * VC_K, h);
         sycl::local_accessor<float, 1> sXd(NT * VC_NG, h);
         h.parallel_for(NR((size_t)ngrps * 96, 256), [=](sycl::nd_item<1> it) REQD_SG16 {
@@ -413,8 +414,8 @@ inline void k_vcache_gemm1_q8(const VramExpertGroup* d_grps, int ngrps, const in
 
 // GEMM2 (down projection) with pre-quantized Q8_1_G64 hmid cached in SLM (<= 12 KiB/WG) + native SG16.
 template <int NT>
-inline void k_vcache_gemm2_q8(const VramExpertGroup* d_grps, int ngrps, const int8_t* d_hq, const float* d_hd, float* d_ye) {
-    Q().submit([&](sycl::handler& h) {
+inline void k_vcache_gemm2_q8(const VramExpertGroup* d_grps, int ngrps, const int8_t* d_hq, const float* d_hd, float* d_ye, sycl::queue& q = Q()) {
+    q.submit([&](sycl::handler& h) {
         sycl::local_accessor<int8_t, 1> sXq(NT * VC_K, h);
         sycl::local_accessor<float, 1> sXd(NT * VC_NG, h);
         h.parallel_for(NR((size_t)ngrps * 96, 256), [=](sycl::nd_item<1> it) REQD_SG16 {
@@ -490,8 +491,8 @@ inline void k_vcache_gemm2_q8(const VramExpertGroup* d_grps, int ngrps, const in
 
 // High-precision FP32/FP16 activation path (when --cpu-hi / q8_act == false): still deduplicates experts & fuses gate+up on SG16!
 template <int NT>
-inline void k_vcache_gemm1_fp(const VramExpertGroup* d_grps, int ngrps, const float* z_dev, half* d_hmid) {
-    Q().submit([&](sycl::handler& h) {
+inline void k_vcache_gemm1_fp(const VramExpertGroup* d_grps, int ngrps, const float* z_dev, half* d_hmid, sycl::queue& q = Q()) {
+    q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> sX(NT * 256, h);  // 1 superblock (256 floats/tok) <= 8 KiB SLM!
         h.parallel_for(NR((size_t)ngrps * 96, 256), [=](sycl::nd_item<1> it) REQD_SG16 {
             const int gid = (int)it.get_group(0);
@@ -560,8 +561,8 @@ inline void k_vcache_gemm1_fp(const VramExpertGroup* d_grps, int ngrps, const fl
 }
 
 template <int NT>
-inline void k_vcache_gemm2_fp(const VramExpertGroup* d_grps, int ngrps, const half* d_hmid, float* d_ye) {
-    Q().submit([&](sycl::handler& h) {
+inline void k_vcache_gemm2_fp(const VramExpertGroup* d_grps, int ngrps, const half* d_hmid, float* d_ye, sycl::queue& q = Q()) {
+    q.submit([&](sycl::handler& h) {
         sycl::local_accessor<float, 1> sX(NT * 256, h);
         h.parallel_for(NR((size_t)ngrps * 96, 256), [=](sycl::nd_item<1> it) REQD_SG16 {
             const int gid = (int)it.get_group(0);

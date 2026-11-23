@@ -195,10 +195,10 @@ struct DevCaps {
     bool has_xmx_sg16 = false;
 };
 
-inline const DevCaps& dev_caps() {
-    static DevCaps c = [] {
-        DevCaps d;
-        auto dev = Q().get_device();
+// Probe an arbitrary device's capabilities (primary: dev_caps(); peer GPUs: probe_dev_caps(pd.q->get_device())).
+inline DevCaps probe_dev_caps(const sycl::device& dev) {
+    DevCaps d;
+    {
         d.name = dev.get_info<sycl::info::device::name>();
         d.platform = dev.get_platform().get_info<sycl::info::platform::name>();
         d.global_mem = dev.get_info<sycl::info::device::global_mem_size>();
@@ -254,8 +254,12 @@ inline const DevCaps& dev_caps() {
                 else if (d.has_sg16) d.has_xmx_sg16 = true;
             }
         }
-        return d;
-    }();
+    }
+    return d;
+}
+
+inline const DevCaps& dev_caps() {
+    static DevCaps c = probe_dev_caps(Q().get_device());
     return c;
 }
 

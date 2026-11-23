@@ -39,14 +39,8 @@ constexpr int8_t kS125[32][4] = {
     {0, 0, 0, 0},     {2, 2, 0, 0},    {-2, -2, 0, 0},  {0, 0, 2, 2},    {0, 0, -2, -2},  {2, -2, 0, 0},   {0, 0, 2, -2},   {2, 0, 2, 0},
 };
 
-struct Item {  // one (expert, 64-token tile) of a group
-    const uint8_t* body_ptr;  // direct device pointer (either dslot + off or VRAM slab pointer!)
-    uint32_t dn_off;
-    uint32_t pbase;
-    uint32_t ntok;
-    int32_t gu, dn;
-    int32_t pad0;
-};
+// one (expert, 64-token tile) of a group — the shared GxItem layout (sy_gpuexp.h), also built by sy_peer.h
+using Item = GxItem;
 
 inline int code_sb_bytes(int code) {
     return code == 0 ? 48 : code == 1 ? 58 : code == 2 ? 70 : code == 3 ? 102 : code == 4 ? 134 : code == 5 ? 166 : code == 6 ? 198 : 262;
@@ -979,6 +973,36 @@ void GpuExperts::run(int L, int T, const float* z_dev, const int32_t* idx, const
     I.stats.pairs += P;
     I.stats.calls++;
     I.stats.seconds += now_s() - t_start;
+}
+
+// Pre-planned grouped evaluation on an arbitrary queue (see sy_gpuexp.h). Peer-GPU callers pass their
+// own in-order queue + peer-context device buffers; planning happens on the host (sy_peer.h).
+sycl::event gx_eval_grouped(sycl::queue& q, const GxItem* d_items, int nitems, const float* z_dev,
+                            const int32_t* d_ptok, const int32_t* d_red, const float* d_pw,
+                            half* d_zg, half* d_hb, float* d_ye, float* d_zout, int P, int T, bool xmx_sg16) {
+    (void)xmx_sg16;
+    if (P > 0) launch_gather(q, z_dev, d_ptok, d_zg, P);
+    if (nitems > 0) {
+#ifdef HY4S_ENABLE_SG16_XMX
+        if (xmx_sg16) {
+            launch_gemm_xmx_sg16<0>(q, nullptr, d_items, nitems, d_zg, d_hb);
+            launch_gemm_xmx_sg16<1>(q, nullptr, d_items, nitems, d_hb, d_ye);
+        } else
+#endif
+        {
+#ifndef HY4S_DISABLE_SG8
+            if (dev_caps().has_xmx_sg8 && q.get_device() == Q().get_device()) {
+                launch_gemm_xmx<0>(q, nullptr, d_items, nitems, d_zg, d_hb);
+                launch_gemm_xmx<1>(q, nullptr, d_items, nitems, d_hb, d_ye);
+            } else
+#endif
+            {
+                launch_gemm_simt<0>(q, nullptr, d_items, nitems, d_zg, d_hb);
+                launch_gemm_simt<1>(q, nullptr, d_items, nitems, d_hb, d_ye);
+            }
+        }
+    }
+    return launch_reduce(q, d_ye, d_red, d_pw, d_zout, T);
 }
 
 }  // namespace hy4s

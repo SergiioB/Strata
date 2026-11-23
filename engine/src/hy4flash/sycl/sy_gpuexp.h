@@ -18,6 +18,27 @@
 
 namespace hy4s {
 
+// Planned (expert, <=64-token tile) work item of the grouped XMX evaluator — shared by GpuExperts
+// (sy_gpuexp.cpp) and the peer-GPU grouped prefill (sy_peer.h). ABI-fixed 32-byte POD.
+struct GxItem {
+    const uint8_t* body_ptr;  // device pointer in the submitting queue's context (staging slot OR resident VRAM slab!)
+    uint32_t dn_off;
+    uint32_t pbase;
+    uint32_t ntok;
+    int32_t gu, dn;
+    int32_t pad0;
+};
+
+// Runs one pre-planned grouped expert evaluation on an arbitrary SYCL queue (primary or peer GPU):
+//   gather z[ptok[p]] -> d_zg (fp16)  ->  GEMM1 + SwiGLU -> d_hb (fp16)  ->  GEMM2 -> d_ye (fp32)
+//   ->  per-token weighted reduce (pairs consumed in ascending expert_id order) -> d_zout.
+// All device pointers must be USM allocations reachable by `q`'s context; an in-order `q` sequences
+// every stage, so the returned reduce event also covers gather + both GEMMs. `xmx_sg16` selects the
+// Xe2 SG16 XMX DPAS kernels (when compiled with HY4S_ENABLE_SG16_XMX); false selects portable SG32 SIMT.
+sycl::event gx_eval_grouped(sycl::queue& q, const GxItem* d_items, int nitems, const float* z_dev,
+                            const int32_t* d_ptok, const int32_t* d_red, const float* d_pw,
+                            half* d_zg, half* d_hb, float* d_ye, float* d_zout, int P, int T, bool xmx_sg16);
+
 struct GpuExpertStats {
     double seconds = 0;
     double t_plan = 0;
